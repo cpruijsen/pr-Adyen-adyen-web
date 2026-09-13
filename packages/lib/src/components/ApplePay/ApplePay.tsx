@@ -7,6 +7,7 @@ import defaultProps from './defaultProps';
 import { httpPost } from '../../core/Services/http';
 import { preparePaymentRequest } from './utils/payment-request';
 import AdyenCheckoutError from '../../core/Errors/AdyenCheckoutError';
+import CancelError from '../../core/Errors/CancelError';
 import { DecodeObject } from '../../types/global-types';
 import { TxVariants } from '../tx-variants';
 import { sanitizeResponse, verifyPaymentDidNotFail } from '../internal/UIElement/utils';
@@ -237,7 +238,17 @@ class ApplePayElement extends UIElement<ApplePayConfiguration> {
                         return paymentResponse;
                     })
                     .then(paymentResponse => {
-                        this.handleResponse(paymentResponse);
+                        // By this point the payment was already authorized and reported as successful to Apple Pay.
+                        // Errors thrown while handling the response are not payment failures
+                        try {
+                            this.handleResponse(paymentResponse);
+                        } catch (error) {
+                            this.handleError(
+                                error instanceof AdyenCheckoutError
+                                    ? error
+                                    : new AdyenCheckoutError('ERROR', 'ApplePay - Failed to handle the payment response', { cause: error })
+                            );
+                        }
                     })
                     .catch((paymentResponse?: RawPaymentResponse) => {
                         const errors = paymentResponse?.error?.applePayError;
@@ -247,8 +258,14 @@ class ApplePayElement extends UIElement<ApplePayConfiguration> {
                             errors: errors ? (Array.isArray(errors) ? errors : [errors]) : undefined
                         });
 
+                        if (paymentResponse instanceof CancelError) {
+                            this.setElementStatus('ready');
+                            return;
+                        }
+
                         const responseWithError: RawPaymentResponse = {
                             ...paymentResponse,
+                            resultCode: paymentResponse?.resultCode ?? 'Error',
                             error: {
                                 applePayError: errors
                             }

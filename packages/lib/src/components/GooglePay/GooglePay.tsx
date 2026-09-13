@@ -6,6 +6,7 @@ import defaultProps from './defaultProps';
 import { formatGooglePayContactToAdyenAddressFormat, getGooglePayLocale } from './utils';
 import collectBrowserInfo from '../../utils/browserInfo';
 import AdyenCheckoutError from '../../core/Errors/AdyenCheckoutError';
+import CancelError from '../../core/Errors/CancelError';
 import { TxVariants } from '../tx-variants';
 import { sanitizeResponse, verifyPaymentDidNotFail } from '../internal/UIElement/utils';
 
@@ -209,7 +210,17 @@ class GooglePay extends UIElement<GooglePayConfiguration> {
                     return paymentResponse;
                 })
                 .then(paymentResponse => {
-                    this.handleResponse(paymentResponse);
+                    // By this point the payment was already authorized and reported as successful to Google Pay.
+                    // Errors thrown while handling the response are not payment failures
+                    try {
+                        this.handleResponse(paymentResponse);
+                    } catch (error) {
+                        this.handleError(
+                            error instanceof AdyenCheckoutError
+                                ? error
+                                : new AdyenCheckoutError('ERROR', 'GooglePay - Failed to handle the payment response', { cause: error })
+                        );
+                    }
                 })
                 .catch((paymentResponse?: RawPaymentResponse) => {
                     this.setElementStatus('ready');
@@ -235,8 +246,13 @@ class GooglePay extends UIElement<GooglePayConfiguration> {
                         error
                     });
 
+                    if (paymentResponse instanceof CancelError) {
+                        return;
+                    }
+
                     const responseWithError = {
                         ...paymentResponse,
+                        resultCode: paymentResponse?.resultCode ?? 'Error',
                         error: {
                             googlePayError: error
                         }

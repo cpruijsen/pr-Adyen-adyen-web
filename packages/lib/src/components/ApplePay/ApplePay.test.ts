@@ -6,6 +6,7 @@
  * The insecure-context scenario lives in ApplePay.insecureContext.test.ts.
  */
 import { httpPost } from '../../core/Services/http';
+import AdyenCheckoutError from '../../core/Errors/AdyenCheckoutError';
 import ApplePay from './ApplePay';
 import ApplePayService from './services/ApplePayService';
 import ApplePaySdkLoader from './services/ApplePaySdkLoader';
@@ -356,7 +357,143 @@ describe('ApplePay', () => {
             });
 
             expect(onPaymentFailedMock).toHaveBeenCalledTimes(1);
-            expect(onPaymentFailedMock).toHaveBeenCalledWith({ error: { applePayError: undefined } }, applepay);
+            expect(onPaymentFailedMock).toHaveBeenCalledWith({ resultCode: 'Error', error: { applePayError: undefined } }, applepay);
+        });
+
+        test('should not call onPaymentFailed when the merchant rejects the payment in beforeSubmit', async () => {
+            const onPaymentFailedMock = jest.fn();
+            const event = mock<ApplePayJS.ApplePayPaymentAuthorizedEvent>({
+                payment: {
+                    token: {
+                        paymentData: 'payment-data'
+                    }
+                }
+            });
+
+            const applepay = new ApplePay(core, {
+                configuration: configurationMock,
+                amount: { currency: 'EUR', value: 2000 },
+                onPaymentFailed: onPaymentFailedMock,
+                beforeSubmit: (_data, _component, actions) => {
+                    actions.reject();
+                }
+            });
+
+            applepay.submit();
+
+            // Session initialized
+            await new Promise(process.nextTick);
+            expect(jest.spyOn(ApplePayService.prototype, 'begin')).toHaveBeenCalledTimes(1);
+
+            // Trigger ApplePayService onPaymentAuthorized property
+            // @ts-ignore ApplePayService is mocked
+            const onPaymentAuthorized = ApplePayService.mock.calls[0][1].onPaymentAuthorized;
+            const resolveMock = jest.fn();
+            const rejectMock = jest.fn();
+            onPaymentAuthorized(resolveMock, rejectMock, event);
+
+            await new Promise(process.nextTick);
+            await new Promise(process.nextTick);
+
+            expect(rejectMock).toHaveBeenCalledWith({
+                errors: undefined,
+                status: 0
+            });
+
+            expect(onPaymentFailedMock).not.toHaveBeenCalled();
+        });
+
+        test('should not call onPaymentFailed when the merchant onPaymentCompleted callback throws', async () => {
+            const onPaymentFailedMock = jest.fn();
+            const onErrorMock = jest.fn();
+            const onPaymentCompletedMock = jest.fn().mockImplementation(() => {
+                throw new Error('Merchant error');
+            });
+            const event = mock<ApplePayJS.ApplePayPaymentAuthorizedEvent>({
+                payment: {
+                    token: {
+                        paymentData: 'payment-data'
+                    }
+                }
+            });
+
+            const applepay = new ApplePay(core, {
+                configuration: configurationMock,
+                amount: { currency: 'EUR', value: 2000 },
+                onError: onErrorMock,
+                onPaymentCompleted: onPaymentCompletedMock,
+                onPaymentFailed: onPaymentFailedMock,
+                onSubmit(state, component, actions) {
+                    actions.resolve({ resultCode: 'Authorised' });
+                }
+            });
+
+            applepay.submit();
+
+            // Session initialized
+            await new Promise(process.nextTick);
+            expect(jest.spyOn(ApplePayService.prototype, 'begin')).toHaveBeenCalledTimes(1);
+
+            // Trigger ApplePayService onPaymentAuthorized property
+            // @ts-ignore ApplePayService is mocked
+            const onPaymentAuthorized = ApplePayService.mock.calls[0][1].onPaymentAuthorized;
+            const resolveMock = jest.fn();
+            const rejectMock = jest.fn();
+            onPaymentAuthorized(resolveMock, rejectMock, event);
+
+            await new Promise(process.nextTick);
+            await new Promise(process.nextTick);
+
+            // The payment was already authorized and reported as successful to Apple Pay,
+            // so a failure while handling the response is not a payment failure
+            expect(resolveMock).toHaveBeenCalledWith({ status: 1 });
+            expect(rejectMock).not.toHaveBeenCalled();
+            expect(onPaymentCompletedMock).toHaveBeenCalledTimes(1);
+            expect(onPaymentFailedMock).not.toHaveBeenCalled();
+            expect(onErrorMock).toHaveBeenCalledTimes(1);
+        });
+
+        test('should call onPaymentFailed with an "Error" resultCode when the payment call rejects without a payment response', async () => {
+            const onPaymentFailedMock = jest.fn();
+            const event = mock<ApplePayJS.ApplePayPaymentAuthorizedEvent>({
+                payment: {
+                    token: {
+                        paymentData: 'payment-data'
+                    }
+                }
+            });
+
+            const applepay = new ApplePay(core, {
+                configuration: configurationMock,
+                amount: { currency: 'EUR', value: 2000 },
+                onPaymentFailed: onPaymentFailedMock
+            });
+
+            jest.spyOn(applepay as any, 'makePaymentsCall').mockRejectedValue(new AdyenCheckoutError('NETWORK_ERROR', 'No response received'));
+
+            applepay.submit();
+
+            // Session initialized
+            await new Promise(process.nextTick);
+            expect(jest.spyOn(ApplePayService.prototype, 'begin')).toHaveBeenCalledTimes(1);
+
+            // Trigger ApplePayService onPaymentAuthorized property
+            // @ts-ignore ApplePayService is mocked
+            const onPaymentAuthorized = ApplePayService.mock.calls[0][1].onPaymentAuthorized;
+            const resolveMock = jest.fn();
+            const rejectMock = jest.fn();
+            onPaymentAuthorized(resolveMock, rejectMock, event);
+
+            await new Promise(process.nextTick);
+            await new Promise(process.nextTick);
+
+            expect(rejectMock).toHaveBeenCalledWith({
+                errors: undefined,
+                status: 0
+            });
+
+            expect(onPaymentFailedMock).toHaveBeenCalledTimes(1);
+            expect(onPaymentFailedMock).toHaveBeenCalledWith(expect.objectContaining({ resultCode: 'Error' }), applepay);
         });
     });
     describe('onOrderTrackingRequest()', () => {

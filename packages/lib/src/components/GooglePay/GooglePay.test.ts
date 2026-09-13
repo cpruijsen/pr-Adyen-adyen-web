@@ -1,4 +1,5 @@
 import { render } from '@testing-library/preact';
+import AdyenCheckoutError from '../../core/Errors/AdyenCheckoutError';
 import GooglePay from './GooglePay';
 import GooglePayService from './GooglePayService';
 
@@ -332,9 +333,98 @@ describe('GooglePay', () => {
             });
 
             expect(onPaymentFailedMock).toHaveBeenCalledWith(
-                { error: { googlePayError: { intent: 'PAYMENT_AUTHORIZATION', message: 'Payment failed', reason: 'OTHER_ERROR' } } },
+                {
+                    resultCode: 'Error',
+                    error: { googlePayError: { intent: 'PAYMENT_AUTHORIZATION', message: 'Payment failed', reason: 'OTHER_ERROR' } }
+                },
                 gpay
             );
+        });
+
+        test('should not call onPaymentFailed when the merchant rejects the payment in beforeSubmit', async () => {
+            const onPaymentFailedMock = jest.fn();
+
+            new GooglePay(core, {
+                configuration: { merchantId: 'merchant-id', gatewayMerchantId: 'gateway-id' },
+                i18n: core.modules.i18n,
+                onPaymentFailed: onPaymentFailedMock,
+                beforeSubmit: (_data, _component, actions) => {
+                    actions.reject();
+                }
+            });
+            const onPaymentAuthorized = getOnPaymentAuthorizedCallback();
+            const promise = onPaymentAuthorized(googlePaymentData);
+
+            await expect(promise).resolves.toEqual({
+                error: {
+                    intent: 'PAYMENT_AUTHORIZATION',
+                    message: 'Payment failed',
+                    reason: 'OTHER_ERROR'
+                },
+                transactionState: 'ERROR'
+            });
+
+            await new Promise(process.nextTick);
+            expect(onPaymentFailedMock).not.toHaveBeenCalled();
+        });
+
+        test('should not call onPaymentFailed when the merchant onPaymentCompleted callback throws', async () => {
+            const onSubmitMock = jest.fn().mockImplementation((data, component, actions) => {
+                actions.resolve({ resultCode: 'Authorised' });
+            });
+            const onPaymentFailedMock = jest.fn();
+            const onErrorMock = jest.fn();
+            const onPaymentCompletedMock = jest.fn().mockImplementation(() => {
+                throw new Error('Merchant error');
+            });
+
+            new GooglePay(core, {
+                configuration: { merchantId: 'merchant-id', gatewayMerchantId: 'gateway-id' },
+                i18n: core.modules.i18n,
+                onSubmit: onSubmitMock,
+                onError: onErrorMock,
+                onPaymentCompleted: onPaymentCompletedMock,
+                onPaymentFailed: onPaymentFailedMock
+            });
+            const onPaymentAuthorized = getOnPaymentAuthorizedCallback();
+            const promise = onPaymentAuthorized(googlePaymentData);
+
+            // The payment was already authorized and reported as successful to Google Pay,
+            // so a failure while handling the response is not a payment failure
+            await expect(promise).resolves.toEqual({ transactionState: 'SUCCESS' });
+
+            await new Promise(process.nextTick);
+            expect(onPaymentCompletedMock).toHaveBeenCalledTimes(1);
+            expect(onPaymentFailedMock).not.toHaveBeenCalled();
+            expect(onErrorMock).toHaveBeenCalledTimes(1);
+        });
+
+        test('should call onPaymentFailed with an "Error" resultCode when the payment call rejects without a payment response', async () => {
+            const onPaymentFailedMock = jest.fn();
+
+            const gpay = new GooglePay(core, {
+                configuration: { merchantId: 'merchant-id', gatewayMerchantId: 'gateway-id' },
+                i18n: core.modules.i18n,
+                onPaymentFailed: onPaymentFailedMock
+            });
+
+            jest.spyOn(gpay as any, 'makePaymentsCall').mockRejectedValue(new AdyenCheckoutError('NETWORK_ERROR', 'No response received'));
+
+            const onPaymentAuthorized = getOnPaymentAuthorizedCallback();
+            const promise = onPaymentAuthorized(googlePaymentData);
+
+            await expect(promise).resolves.toEqual({
+                error: {
+                    intent: 'PAYMENT_AUTHORIZATION',
+                    message: 'Payment failed',
+                    reason: 'OTHER_ERROR'
+                },
+                transactionState: 'ERROR'
+            });
+
+            await new Promise(process.nextTick);
+            expect(onPaymentFailedMock).toHaveBeenCalledTimes(1);
+            expect(onPaymentFailedMock).toHaveBeenCalledWith(expect.objectContaining({ resultCode: 'Error' }), gpay);
         });
     });
 
